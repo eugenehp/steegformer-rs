@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-03-30 23:33:22",
+  "os": "Darwin",
+  "arch": "arm64",
+  "cpu": "Apple M4 Pro (Virtual)",
+  "cpu_info": "10C/10T, 64GB RAM",
+  "gpu_backend": "metal",
+  "variants": "small",
+  "warmup": 3,
+  "runs": 10
+}

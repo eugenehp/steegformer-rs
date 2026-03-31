@@ -1,0 +1,75 @@
+[package]
+name = "steegformer-rs"
+version = "0.0.1"
+edition = "2021"
+description = "ST-EEGFormer EEG Foundation Model — inference in Rust with Burn ML"
+keywords      = ["eeg", "foundational", "BCI", "GPU", "CPU"]
+categories    = ["science", "mathematics"]
+authors       = ["Eugene Hauptmann"]
+license       = "Apache-2.0"
+readme        = "README.md"
+
+exclude = [
+    "data/",
+    "scripts/",
+    "tests/vectors/",
+]
+
+[lib]
+name = "steegformer_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "infer"
+path = "src/bin/infer.rs"
+
+[[bin]]
+name = "gen_sample_eeg"
+path = "src/bin/gen_sample_eeg.rs"
+
+[[bin]]
+name = "safetensors_info"
+path = "src/bin/safetensors_info.rs"
+
+[[example]]
+name = "embed"
+path = "examples/embed.rs"
+
+[[example]]
+name = "reconstruct"
+path = "examples/reconstruct.rs"
+
+[[example]]
+name = "benchmark"
+path = "examples/benchmark.rs"
+
+[features]
+default = ["ndarray"]
+
+# ── CPU backends ─────────────────────────────────────────────────────────────
+ndarray         = ["dep:burn-ndarray", "burn/ndarray"]
+blas-accelerate = ["burn-ndarray?/blas-accelerate"]
+openblas-system = ["burn-ndarray?/blas-openblas-system"]
+
+# ── GPU backend ──────────────────────────────────────────────────────────────
+wgpu            = ["burn/wgpu"]
+metal           = ["wgpu", "burn-wgpu/metal"]
+vulkan          = ["wgpu", "burn-wgpu/vulkan"]
+
+[dependencies]
+burn = { version = "0.20.1", default-features = false, features = ["std", "simd"] }
+burn-ndarray = { version = "0.20.1", default-features = false, features = ["std", "simd", "multi-threads"], optional = true }
+burn-wgpu = { version = "0.20.1", default-features = true, optional = true }
+
+safetensors = "0.7"
+half = { version = "2", features = ["bytemuck"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1.0.102"
+bytemuck = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

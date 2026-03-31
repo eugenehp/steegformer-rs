@@ -1,0 +1,9 @@
+/target
+Cargo.lock
+*.safetensors
+*.pth
+data/sample.csv
+data/checkpoint*
+tests/vectors/
+bench_results/*/cpu.log
+bench_results/*/gpu.log
