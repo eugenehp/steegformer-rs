@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use clap::Parser;
-use steegformer_rs::{STEEGFormerEncoder, ModelConfig, data, channel_vocab};
+use steegformer::{STEEGFormerEncoder, ModelConfig, data, channel_vocab};
 
 #[derive(Parser, Debug)]
 #[command(about = "ST-EEGFormer — latent embedding extraction")]
@@ -74,7 +74,7 @@ fn main() -> anyhow::Result<()> {
     println!("▸ Generating {} synthetic EEG segments ({} ch × {} samples each)\n",
         n_segments, n_channels, n_samples);
 
-    let mut all_outputs: Vec<steegformer_rs::SegmentEmbedding> = Vec::new();
+    let mut all_outputs: Vec<steegformer::SegmentEmbedding> = Vec::new();
 
     for seg_idx in 0..n_segments {
         let signal = generate_synthetic_eeg(n_channels, n_samples, 128.0 + seg_idx as f32);
@@ -101,7 +101,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // 4. Save
-    let encoding = steegformer_rs::EncodingResult {
+    let encoding = steegformer::EncodingResult {
         segments: all_outputs,
         ms_preproc: 0.0,
         ms_encode: t0.elapsed().as_secs_f64() * 1000.0,

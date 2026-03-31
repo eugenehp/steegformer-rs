@@ -11,7 +11,7 @@
 
 use std::{path::Path, time::Instant};
 use clap::Parser;
-use steegformer_rs::{STEEGFormerEncoder, data, channel_vocab};
+use steegformer::{STEEGFormerEncoder, data, channel_vocab};
 
 // ── Backend ───────────────────────────────────────────────────────────────────
 #[cfg(all(feature = "wgpu", not(feature = "ndarray")))]

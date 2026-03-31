@@ -1,5 +1,5 @@
 [package]
-name = "steegformer-rs"
+name = "steegformer"
 version = "0.0.1"
 edition = "2021"
 description = "ST-EEGFormer EEG Foundation Model — inference in Rust with Burn ML"
@@ -16,7 +16,7 @@ exclude = [
 ]
 
 [lib]
-name = "steegformer_rs"
+name = "steegformer"
 path = "src/lib.rs"
 
 [[bin]]

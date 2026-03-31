@@ -6,8 +6,8 @@
 use std::time::Instant;
 use clap::Parser;
 
-use steegformer_rs::{ModelConfig, data, channel_vocab};
-use steegformer_rs::model::steegformer::STEEGFormer;
+use steegformer::{ModelConfig, data, channel_vocab};
+use steegformer::model::steegformer::STEEGFormer;
 
 #[derive(Parser, Debug)]
 #[command(about = "ST-EEGFormer — model loading and forward pass test")]
@@ -50,9 +50,9 @@ fn main() -> anyhow::Result<()> {
     // Create model (random weights if no weights file provided)
     let steeg = if let Some(ref weights_path) = args.weights {
         println!("▸ Loading weights from {weights_path} …");
-        let mut wm = steegformer_rs::weights::WeightMap::from_file(weights_path)?;
+        let mut wm = steegformer::weights::WeightMap::from_file(weights_path)?;
         if args.verbose { wm.print_keys(); }
-        steegformer_rs::weights::load_model_from_wm(&cfg, &mut wm, &device)?
+        steegformer::weights::load_model_from_wm(&cfg, &mut wm, &device)?
     } else {
         println!("▸ Initializing with random weights (no --weights provided)");
         STEEGFormer::new(&cfg, &device)

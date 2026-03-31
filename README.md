@@ -188,7 +188,7 @@ python scripts/generate_charts.py bench_results/<run_dir>/
 ## API Usage
 
 ```rust
-use steegformer_rs::{STEEGFormerEncoder, ModelConfig, data};
+use steegformer::{STEEGFormerEncoder, ModelConfig, data};
 use burn::backend::NdArray as B;
 use std::path::Path;
 

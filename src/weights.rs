@@ -159,6 +159,7 @@ fn load_encoder_weights<B: Backend>(
     device: &B::Device,
 ) -> anyhow::Result<()> {
     let model = &mut steeg.model;
+    let mut cls_loaded = false;
 
     // ── Patch embedding ─────────────────────────────────────────────────────
     if let (Ok(w), Ok(b)) = (
@@ -171,6 +172,7 @@ fn load_encoder_weights<B: Backend>(
     // ── CLS token ───────────────────────────────────────────────────────────
     if let Ok(t) = wm.take::<B, 3>("cls_token", device) {
         model.cls_token = model.cls_token.clone().map(|_| t);
+        cls_loaded = true;
     }
 
     // ── Channel embedding ───────────────────────────────────────────────────
@@ -243,6 +245,11 @@ fn load_encoder_weights<B: Backend>(
             wm.take::<B, 2>("head.weight", device),
             wm.take::<B, 1>("head.bias", device),
         ) { set_linear_wb(head, w, b); }
+    }
+
+    // Rebuild CLS+PE cache if CLS token was loaded
+    if cls_loaded {
+        crate::model::steegformer::STEEGFormer::rebuild_cls_cache(steeg);
     }
 
     Ok(())

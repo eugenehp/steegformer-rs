@@ -1,11 +1,9 @@
 /// Multi-Head Self-Attention for ST-EEGFormer.
 ///
-/// Python (via timm Block): standard ViT attention with qkv_bias=True.
-///   qkv = Linear(dim, 3*dim) → reshape → [3, B, H, S, D]
-///   attn = softmax(q @ k^T / sqrt(d)) @ v
-///   output = proj(concat_heads(attn))
-///
-/// No rotary embeddings — ST-EEGFormer uses additive positional encodings.
+/// Manual QK^T + softmax + V implementation:
+///   - cubecl flash-attention hardcodes causal=true (wrong for bidirectional encoder)
+///   - For S=193 tokens, naive SDPA is fast enough — no flash-attention needed
+///   - Scale fused into Q (one mul_scalar vs post-matmul div)
 
 use burn::prelude::*;
 use burn::nn::{Linear, LinearConfig};
@@ -17,6 +15,7 @@ pub struct MultiHeadSelfAttention<B: Backend> {
     pub proj:     Linear<B>,
     pub n_heads:  usize,
     pub head_dim: usize,
+    pub scale:    f32,
 }
 
 impl<B: Backend> MultiHeadSelfAttention<B> {
@@ -32,6 +31,7 @@ impl<B: Backend> MultiHeadSelfAttention<B> {
             proj: LinearConfig::new(dim, dim).with_bias(true).init(device),
             n_heads,
             head_dim,
+            scale: (head_dim as f32).powf(-0.5),
         }
     }
 
@@ -41,26 +41,26 @@ impl<B: Backend> MultiHeadSelfAttention<B> {
         let (h, dh) = (self.n_heads, self.head_dim);
         let dim = h * dh;
 
-        // QKV projection: [B, S, 3*dim]
+        // Fused QKV projection: [B, S, 3*dim]
         let qkv = self.qkv.forward(x);
 
-        // Split into Q, K, V: each [B, S, dim]
-        let q = qkv.clone().narrow(2, 0, dim);
-        let k = qkv.clone().narrow(2, dim, dim);
-        let v = qkv.narrow(2, dim * 2, dim);
+        // Split via narrow (view-level, no copy)
+        let q = qkv.clone().narrow(2, 0, dim)
+            .reshape([b, s, h, dh]).swap_dims(1, 2);
+        let k = qkv.clone().narrow(2, dim, dim)
+            .reshape([b, s, h, dh]).swap_dims(1, 2);
+        let v = qkv.narrow(2, dim * 2, dim)
+            .reshape([b, s, h, dh]).swap_dims(1, 2);
 
-        // Reshape to multi-head: [B, S, H, D] → [B, H, S, D]
-        let q = q.reshape([b, s, h, dh]).swap_dims(1, 2);
-        let k = k.reshape([b, s, h, dh]).swap_dims(1, 2);
-        let v = v.reshape([b, s, h, dh]).swap_dims(1, 2);
+        // Fuse scale into Q (saves one kernel dispatch vs post-matmul div)
+        let q = q.mul_scalar(self.scale);
 
-        // Scaled dot-product attention
-        let scale = (dh as f64).powf(-0.5) as f32;
-        let attn = softmax(q.matmul(k.transpose()).mul_scalar(scale), 3);
-        let out = attn.matmul(v);  // [B, H, S, D]
+        // Attention: softmax(Q·K^T) · V
+        let attn = softmax(q.matmul(k.swap_dims(2, 3)), 3);
+        let out = attn.matmul(v);
 
-        // Reshape back: [B, S, dim]
-        let out = out.swap_dims(1, 2).reshape([b, s, dim]);
+        // [B, H, S, dh] → [B, S, dim]
+        let out = out.swap_dims(1, 2).flatten(2, 3);
         self.proj.forward(out)
     }
 }

@@ -1,4 +1,4 @@
-//! # steegformer-rs — ST-EEGFormer EEG Foundation Model inference in Rust
+//! # steegformer — ST-EEGFormer EEG Foundation Model inference in Rust
 //!
 //! Pure-Rust inference for the ST-EEGFormer (Spatio-Temporal EEG Transformer)
 //! EEG foundation model, built on [Burn 0.20](https://burn.dev).
@@ -17,7 +17,7 @@
 //! ## Quick start
 //!
 //! ```rust,ignore
-//! use steegformer_rs::STEEGFormerEncoder;
+//! use steegformer::STEEGFormerEncoder;
 //!
 //! let (encoder, ms) = STEEGFormerEncoder::<B>::load(
 //!     Path::new("config.json"),
@@ -25,7 +25,7 @@
 //!     device,
 //! )?;
 //!
-//! let batch = steegformer_rs::build_batch_named::<B>(
+//! let batch = steegformer::build_batch_named::<B>(
 //!     signal, &["Fz", "C3", "C4", "Pz"], n_samples, &device,
 //! );
 //! let result = encoder.run_batch(&batch)?;

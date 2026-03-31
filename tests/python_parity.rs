@@ -4,8 +4,8 @@
 
 use burn::backend::NdArray as B;
 use burn::prelude::*;
-use steegformer_rs::config::ModelConfig;
-use steegformer_rs::weights::{WeightMap, load_model_from_wm};
+use steegformer::config::ModelConfig;
+use steegformer::weights::{WeightMap, load_model_from_wm};
 
 const VECTORS_PATH: &str = "tests/vectors/parity.safetensors";
 const WEIGHTS_PATH: &str = "tests/vectors/encoder_small.safetensors";

@@ -2,8 +2,8 @@
 
 use burn::backend::NdArray as B;
 use burn::prelude::*;
-use steegformer_rs::{ModelConfig, data, channel_vocab};
-use steegformer_rs::model::steegformer::STEEGFormer;
+use steegformer::{ModelConfig, data, channel_vocab};
+use steegformer::model::steegformer::STEEGFormer;
 
 #[test]
 fn test_forward_small() {
@@ -35,7 +35,7 @@ fn test_channel_vocab_lookup() {
 #[test]
 fn test_patch_embed_shape() {
     let device = burn::backend::ndarray::NdArrayDevice::Cpu;
-    let pe = steegformer_rs::model::patch_embed::PatchEmbedEEG::<B>::new(16, 512, &device);
+    let pe = steegformer::model::patch_embed::PatchEmbedEEG::<B>::new(16, 512, &device);
 
     let x = Tensor::<B, 3>::ones([1, 4, 768], &device);
     let y = pe.forward(x);
@@ -49,7 +49,7 @@ fn test_patch_embed_shape() {
 #[test]
 fn test_temporal_pe_shape() {
     let device = burn::backend::ndarray::NdArrayDevice::Cpu;
-    let tpe = steegformer_rs::model::positional::TemporalPositionalEncoding::<B>::new(512, 100, &device);
+    let tpe = steegformer::model::positional::TemporalPositionalEncoding::<B>::new(512, 100, &device);
 
     let indices = Tensor::<B, 1, Int>::from_data(
         TensorData::new(vec![1i64, 2, 3, 4, 5], vec![5]), &device,

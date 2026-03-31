@@ -14,13 +14,13 @@ tags:
   - rust
 language:
   - en
-library_name: steegformer-rs
+library_name: steegformer
 pipeline_tag: feature-extraction
 ---
 
 # ST-EEGFormer — Safetensors Weights
 
-Pre-converted [safetensors](https://github.com/huggingface/safetensors) weights for the [ST-EEGFormer](https://github.com/LiuyinYang1101/STEEGFormer) EEG foundation model, ready for use with **[steegformer-rs](https://github.com/eugenehp/steegformer-rs)** (pure-Rust inference on [Burn 0.20](https://burn.dev)) or any framework that supports safetensors.
+Pre-converted [safetensors](https://github.com/huggingface/safetensors) weights for the [ST-EEGFormer](https://github.com/LiuyinYang1101/STEEGFormer) EEG foundation model, ready for use with **[steegformer](https://github.com/eugenehp/steegformer-rs)** (pure-Rust inference on [Burn 0.20](https://burn.dev)) or any framework that supports safetensors.
 
 Weights are converted from the official PyTorch `.pth` checkpoints published at [LiuyinYang1101/STEEGFormer](https://github.com/LiuyinYang1101/STEEGFormer/releases).
 
@@ -58,7 +58,7 @@ ST-EEGFormer won **1st Place** in the NeurIPS 2025 EEG Foundation Challenge and 
 
 ```bash
 # Install
-cargo add steegformer-rs
+cargo add steegformer
 
 # Download weights
 huggingface-cli download eugenehp/ST-EEGFormer \
@@ -75,7 +75,7 @@ cargo run --release --bin infer -- \
 ### Library API
 
 ```rust
-use steegformer_rs::{STEEGFormerEncoder, ModelConfig, data};
+use steegformer::{STEEGFormerEncoder, ModelConfig, data};
 use std::path::Path;
 
 // Load model
@@ -285,7 +285,7 @@ MIT — same as the original ST-EEGFormer release.
 
 | | |
 |---|---|
-| **Rust crate** | [github.com/eugenehp/steegformer-rs](https://github.com/eugenehp/steegformer-rs) |
+| **Rust crate** | [github.com/eugenehp/steegformer](https://github.com/eugenehp/steegformer-rs) |
 | **Original code** | [github.com/LiuyinYang1101/STEEGFormer](https://github.com/LiuyinYang1101/STEEGFormer) |
 | **Original weights** | [GitHub Releases](https://github.com/LiuyinYang1101/STEEGFormer/releases) |
 | **Paper** | [OpenReview (ICLR 2026)](https://openreview.net/forum?id=5Xwm8e6vbh) |

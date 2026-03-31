@@ -70,6 +70,28 @@ impl<B: Backend> TemporalPositionalEncoding<B> {
     pub fn get_cls_token(&self) -> Tensor<B, 1> {
         self.pe.clone().narrow(0, 0, 1).reshape([self.d_model])
     }
+
+    /// Get pre-tiled temporal embeddings for a given seq/channel layout.
+    ///
+    /// Returns: [seq_total, d_model] where seq_total = seq * ch_all.
+    /// Each time position is repeated ch_all times.
+    /// Avoids creating Int index tensors on every forward call.
+    pub fn get_tiled(
+        &self,
+        seq: usize,
+        ch_all: usize,
+        d_model: usize,
+        _device: &B::Device,
+    ) -> Tensor<B, 2> {
+        // Slice [0..seq] from PE buffer
+        let temp_emb = self.pe.clone().narrow(0, 0, seq);  // [seq, D]
+
+        // Tile across channels: [seq, D] → [seq, ch_all, D] → [seq*ch_all, D]
+        temp_emb
+            .unsqueeze_dim::<3>(1)
+            .expand([seq, ch_all, d_model])
+            .reshape([seq * ch_all, d_model])
+    }
 }
 
 /// Learned channel positional embedding.
