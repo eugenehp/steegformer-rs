@@ -52,7 +52,7 @@ EEG signal (B, C, T)   — C channels, T samples @ 128 Hz
 | ST-EEGFormer-Base  | ~86M | 12 | 12 | 768 |
 | ST-EEGFormer-Large | ~300M | 24 | 16 | 1024 |
 
-Pre-trained weights from [GitHub Releases](https://github.com/LiuyinYang1101/STEEGFormer/releases).
+Pre-trained weights on [HuggingFace](https://huggingface.co/eugenehp/ST-EEGFormer) (safetensors) and [GitHub Releases](https://github.com/LiuyinYang1101/STEEGFormer/releases) (PyTorch .pth).
 
 ---
 
@@ -123,6 +123,16 @@ Verified against the Python implementation at every stage:
 ---
 
 ## Quick Start
+
+### Download weights
+
+```bash
+# From HuggingFace (recommended)
+huggingface-cli download eugenehp/ST-EEGFormer \
+    ST-EEGFormer_small_encoder.safetensors \
+    config.json \
+    --local-dir weights/
+```
 
 ### Build
 

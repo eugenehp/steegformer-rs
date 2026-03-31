@@ -1,0 +1,44 @@
+{
+  "models": {
+    "small": {
+      "patch_size": 16,
+      "embed_dim": 512,
+      "depth": 8,
+      "num_heads": 8,
+      "mlp_ratio": 4.0,
+      "decoder_embed_dim": 384,
+      "decoder_depth": 4,
+      "decoder_num_heads": 16
+    },
+    "base": {
+      "patch_size": 16,
+      "embed_dim": 768,
+      "depth": 12,
+      "num_heads": 12,
+      "mlp_ratio": 4.0,
+      "decoder_embed_dim": 512,
+      "decoder_depth": 8,
+      "decoder_num_heads": 16
+    },
+    "large": {
+      "patch_size": 16,
+      "embed_dim": 1024,
+      "depth": 24,
+      "num_heads": 16,
+      "mlp_ratio": 4.0,
+      "decoder_embed_dim": 512,
+      "decoder_depth": 8,
+      "decoder_num_heads": 16
+    },
+    "largeV2": {
+      "patch_size": 16,
+      "embed_dim": 1024,
+      "depth": 24,
+      "num_heads": 16,
+      "mlp_ratio": 4.0,
+      "decoder_embed_dim": 512,
+      "decoder_depth": 8,
+      "decoder_num_heads": 16
+    }
+  }
+}
