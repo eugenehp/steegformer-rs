@@ -382,7 +382,6 @@ pub fn launch_gelu(
 
     let total: usize = x.shape.dims.iter().product();
     let cube_dim_x: u32 = 256;
-    // Each thread processes 4 elements
     let threads_needed = ((total as u32) + 3) / 4;
     let cube_count_x = (threads_needed + cube_dim_x - 1) / cube_dim_x;
     let cube_dim = CubeDim { x: cube_dim_x, y: 1, z: 1 };
@@ -417,10 +416,11 @@ pub fn launch_gelu(
 //    out = GELU(x + bias)
 // ══════════════════════════════════════════════════════════════════════════
 
-/// Fused bias + GELU with 4-element vectorization.
+/// Fused bias + GELU with 4-element manual unrolling.
 /// Uses fast GELU: x * sigmoid(1.702 * x) = x / (1 + exp(-1.702 * x))
-/// This uses 1 exp() vs tanh-GELU's 2 exp(), giving ~40% speedup.
-/// Max error vs exact GELU: <0.02% (well within f32 precision).
+/// Manual unrolling is faster than 1-per-thread because CubeCL's
+/// generated MSL uses strided buffer access patterns that prevent
+/// Metal's auto-vectorizer from coalescing into float4 loads.
 #[cube(launch)]
 fn bias_gelu_kernel<F: Float>(
     x: &Tensor<F>,
@@ -429,34 +429,27 @@ fn bias_gelu_kernel<F: Float>(
     bias_dim: u32,
     total: usize,
 ) {
-    // Process 4 elements per thread to amortize dispatch overhead
     let base = ABSOLUTE_POS * 4;
     let coeff = F::new(1.702);
-
-    // Unrolled 4-wide loop
     if base < total {
-        let pos0 = base;
-        let bias_idx0 = (pos0 as u32) % bias_dim;
-        let v0 = x[pos0] + bias[bias_idx0 as usize];
-        out[pos0] = v0 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v0));
+        let bias_idx0 = (base as u32) % bias_dim;
+        let v0 = x[base] + bias[bias_idx0 as usize];
+        out[base] = v0 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v0));
     }
     if base + 1 < total {
-        let pos1 = base + 1;
-        let bias_idx1 = (pos1 as u32) % bias_dim;
-        let v1 = x[pos1] + bias[bias_idx1 as usize];
-        out[pos1] = v1 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v1));
+        let bias_idx1 = ((base + 1) as u32) % bias_dim;
+        let v1 = x[base + 1] + bias[bias_idx1 as usize];
+        out[base + 1] = v1 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v1));
     }
     if base + 2 < total {
-        let pos2 = base + 2;
-        let bias_idx2 = (pos2 as u32) % bias_dim;
-        let v2 = x[pos2] + bias[bias_idx2 as usize];
-        out[pos2] = v2 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v2));
+        let bias_idx2 = ((base + 2) as u32) % bias_dim;
+        let v2 = x[base + 2] + bias[bias_idx2 as usize];
+        out[base + 2] = v2 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v2));
     }
     if base + 3 < total {
-        let pos3 = base + 3;
-        let bias_idx3 = (pos3 as u32) % bias_dim;
-        let v3 = x[pos3] + bias[bias_idx3 as usize];
-        out[pos3] = v3 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v3));
+        let bias_idx3 = ((base + 3) as u32) % bias_dim;
+        let v3 = x[base + 3] + bias[bias_idx3 as usize];
+        out[base + 3] = v3 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v3));
     }
 }
 
@@ -471,7 +464,6 @@ pub fn launch_bias_gelu(
     let bias_dim = *bias.shape.dims.last().unwrap() as u32;
     let total: usize = x.shape.dims.iter().product();
     let cube_dim_x: u32 = 256;
-    // Each thread processes 4 elements
     let threads_needed = ((total as u32) + 3) / 4;
     let cube_count_x = (threads_needed + cube_dim_x - 1) / cube_dim_x;
     let cube_dim = CubeDim { x: cube_dim_x, y: 1, z: 1 };
@@ -755,7 +747,6 @@ pub fn launch_bias_residual_add(
     let bias_dim = *bias.shape.dims.last().unwrap() as u32;
     let total: usize = residual.shape.dims.iter().product();
     let cube_dim_x: u32 = 256;
-    // Each thread processes 4 elements
     let threads_needed = ((total as u32) + 3) / 4;
     let cube_count_x = (threads_needed + cube_dim_x - 1) / cube_dim_x;
     let cube_dim = CubeDim { x: cube_dim_x, y: 1, z: 1 };
