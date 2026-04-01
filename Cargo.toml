@@ -48,6 +48,11 @@ name = "gpu_profile"
 path = "examples/gpu_profile.rs"
 required-features = ["wgpu-kernels"]
 
+[[example]]
+name = "matmul_test"
+path = "examples/matmul_test.rs"
+required-features = ["wgpu-kernels"]
+
 [features]
 default = ["ndarray"]
 
