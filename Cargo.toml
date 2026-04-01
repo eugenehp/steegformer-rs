@@ -99,3 +99,13 @@ codegen-units = 1
 [patch.crates-io]
 cubek-matmul = { path = "vendor/cubek-matmul" }
 cubecl-cpp = { path = "vendor/cubecl-cpp" }
+cubecl = { path = "vendor/cubecl" }
+cubecl-core = { path = "vendor/cubecl-core" }
+cubecl-ir = { path = "vendor/cubecl-ir" }
+cubecl-wgpu = { path = "vendor/cubecl-wgpu" }
+cubecl-std = { path = "vendor/cubecl-std" }
+cubecl-runtime = { path = "vendor/cubecl-runtime" }
+cubecl-macros = { path = "vendor/cubecl-macros" }
+cubecl-macros-internal = { path = "vendor/cubecl-macros-internal" }
+cubecl-opt = { path = "vendor/cubecl-opt" }
+cubecl-common = { path = "vendor/cubecl-common" }
