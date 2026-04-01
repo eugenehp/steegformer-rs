@@ -39,12 +39,45 @@ pub struct STEEGFormer<B: Backend> {
     pub global_pool: bool,
 }
 
+/// Pre-cached weight tensors for zero-overhead forward pass.
+/// Avoids repeated `Param::val()` calls (Arc clone) and `unsqueeze` per forward.
+pub struct WeightCache<B: Backend> {
+    /// Per-block cached weights
+    pub blocks: Vec<BlockWeightCache<B>>,
+    /// Final norm weights (if CLS pool)
+    pub final_norm_weight: Option<Tensor<B, 1>>,
+    pub final_norm_bias: Option<Tensor<B, 1>>,
+    pub final_norm_eps: f32,
+}
+
+pub struct BlockWeightCache<B: Backend> {
+    pub qkv_w: Tensor<B, 3>,      // [1, D, 3D] — pre-unsqueezed for 3D matmul
+    pub qkv_bias: Tensor<B, 1>,   // [3D]
+    pub proj_w: Tensor<B, 3>,     // [1, D, D]
+    pub proj_bias: Tensor<B, 1>,  // [D]
+    pub fc1_w: Tensor<B, 3>,      // [1, D, ff]
+    pub fc1_bias: Tensor<B, 1>,   // [ff]
+    pub fc2_w: Tensor<B, 3>,      // [1, ff, D]
+    pub fc2_bias: Tensor<B, 1>,   // [D]
+    pub norm1_weight: Tensor<B, 1>,
+    pub norm1_bias: Tensor<B, 1>,
+    pub norm1_eps: f32,
+    pub norm2_weight: Tensor<B, 1>,
+    pub norm2_bias: Tensor<B, 1>,
+    pub norm2_eps: f32,
+    pub n_heads: usize,
+    pub head_dim: usize,
+    pub scale: f32,
+}
+
 /// Encoder with pre-computed buffers for fast inference.
 pub struct STEEGFormerWithPE<B: Backend> {
     pub model: STEEGFormer<B>,
     pub temporal_pe: TemporalPositionalEncoding<B>,
     /// Pre-computed CLS token with PE already added: [1, 1, D]
     pub cls_with_pe: Tensor<B, 3>,
+    /// Cached weight tensors (built lazily on first forward or after weight loading)
+    pub weight_cache: Option<WeightCache<B>>,
 }
 
 impl<B: Backend> STEEGFormer<B> {
@@ -94,7 +127,9 @@ impl<B: Backend> STEEGFormer<B> {
             global_pool: cfg.global_pool,
         };
 
-        STEEGFormerWithPE { model, temporal_pe, cls_with_pe }
+        let mut steeg = STEEGFormerWithPE { model, temporal_pe, cls_with_pe, weight_cache: None };
+        Self::build_weight_cache(&mut steeg);
+        steeg
     }
 
     /// Rebuild the cls_with_pe cache after weight loading.
@@ -102,6 +137,47 @@ impl<B: Backend> STEEGFormer<B> {
         let cls_pe = steeg.temporal_pe.get_cls_token();
         steeg.cls_with_pe = steeg.model.cls_token.val()
             + cls_pe.unsqueeze_dim::<2>(0).unsqueeze_dim::<3>(0);
+    }
+
+    /// Build the weight cache for zero-overhead forward calls.
+    pub fn build_weight_cache(steeg: &mut STEEGFormerWithPE<B>) {
+        let blocks: Vec<BlockWeightCache<B>> = steeg.model.blocks.iter().map(|blk| {
+            BlockWeightCache {
+                qkv_w: blk.attn.qkv.weight.val().unsqueeze_dim::<3>(0),
+                qkv_bias: blk.attn.qkv.bias.as_ref().unwrap().val(),
+                proj_w: blk.attn.proj.weight.val().unsqueeze_dim::<3>(0),
+                proj_bias: blk.attn.proj.bias.as_ref().unwrap().val(),
+                fc1_w: blk.mlp.fc1.weight.val().unsqueeze_dim::<3>(0),
+                fc1_bias: blk.mlp.fc1.bias.as_ref().unwrap().val(),
+                fc2_w: blk.mlp.fc2.weight.val().unsqueeze_dim::<3>(0),
+                fc2_bias: blk.mlp.fc2.bias.as_ref().unwrap().val(),
+                norm1_weight: blk.norm1.inner.gamma.val(),
+                norm1_bias: blk.norm1.inner.beta.as_ref().unwrap().val(),
+                norm1_eps: blk.norm1.eps as f32,
+                norm2_weight: blk.norm2.inner.gamma.val(),
+                norm2_bias: blk.norm2.inner.beta.as_ref().unwrap().val(),
+                norm2_eps: blk.norm2.eps as f32,
+                n_heads: blk.attn.n_heads,
+                head_dim: blk.attn.head_dim,
+                scale: blk.attn.scale,
+            }
+        }).collect();
+
+        let (final_norm_weight, final_norm_bias, final_norm_eps) =
+            if let Some(ref norm) = steeg.model.norm {
+                (Some(norm.inner.gamma.val()), Some(norm.inner.beta.as_ref().unwrap().val()), norm.eps as f32)
+            } else if let Some(ref norm) = steeg.model.fc_norm {
+                (Some(norm.inner.gamma.val()), Some(norm.inner.beta.as_ref().unwrap().val()), norm.eps as f32)
+            } else {
+                (None, None, 1e-6)
+            };
+
+        steeg.weight_cache = Some(WeightCache {
+            blocks,
+            final_norm_weight,
+            final_norm_bias,
+            final_norm_eps,
+        });
     }
 }
 
@@ -225,79 +301,142 @@ macro_rules! define_forward_features {
 #[cfg(not(feature = "wgpu-kernels"))]
 define_forward_features!();
 
-/// Fused version that chains blocks: the last dispatch of block N fuses with
-/// norm1 of block N+1, saving 1 layernorm dispatch per block boundary (7 saves).
+/// Fused version with weight caching and cross-block norm fusion.
+/// Uses pre-cached weight tensors to avoid per-call Param::val() + unsqueeze overhead.
 #[cfg(feature = "wgpu-kernels")]
-macro_rules! define_forward_features_fused {
-    () => {
-        fn forward_features_impl<B: Backend + super::FusedOps>(
-            this: &STEEGFormerWithPE<B>,
-            eeg: Tensor<B, 3>,
-            chan_idx: Tensor<B, 2, Int>,
-        ) -> Tensor<B, 2> {
-            let [b, _c, t] = eeg.dims();
-            let dmodel = this.model.embed_dim;
-            let patch_size = this.model.patch_size;
-            let n_channels = chan_idx.dims()[1];
-            let num_patches = t / patch_size;
-            let seq_total = num_patches * n_channels;
+fn forward_features_impl<B: Backend + super::FusedOps>(
+    this: &STEEGFormerWithPE<B>,
+    eeg: Tensor<B, 3>,
+    chan_idx: Tensor<B, 2, Int>,
+) -> Tensor<B, 2> {
+    let [b, _c, _t] = eeg.dims();
+    let dmodel = this.model.embed_dim;
 
-            // 1-3) Patch embed + positional encoding + CLS prepend
-            let x = this.model.patch_embed.forward(eeg.clone());
-            let [_, seq, ch_all, _] = x.dims();
-            let ch_emb = this.model.channel_embed.forward(chan_idx)
-                .unsqueeze_dim::<4>(1);
-            let tp_emb = this.temporal_pe.pe.clone()
-                .narrow(0, 0, seq)
-                .unsqueeze_dim::<3>(1)
-                .unsqueeze_dim::<4>(0);
-            let x = (x + ch_emb + tp_emb)
-                .reshape([b, seq_total, dmodel]);
-            let cls_tokens = this.cls_with_pe.clone().expand([b, 1, dmodel]);
-            let mut x = Tensor::cat(vec![cls_tokens, x], 1);
+    // 1-3) Patch embed + positional encoding + CLS prepend
+    let x = this.model.patch_embed.forward(eeg.clone());
+    let [_, seq, ch_all, _] = x.dims();
+    let seq_total = seq * ch_all;
+    let ch_emb = this.model.channel_embed.forward(chan_idx)
+        .unsqueeze_dim::<4>(1);
+    let tp_emb = this.temporal_pe.pe.clone()
+        .narrow(0, 0, seq)
+        .unsqueeze_dim::<3>(1)
+        .unsqueeze_dim::<4>(0);
+    let x = (x + ch_emb + tp_emb)
+        .reshape([b, seq_total, dmodel]);
+    let cls_tokens = this.cls_with_pe.clone().expand([b, 1, dmodel]);
+    let mut x = Tensor::cat(vec![cls_tokens, x], 1);
 
-            // 4) Transformer blocks — chained with cross-block norm fusion
-            let n_blocks = this.model.blocks.len();
-            if n_blocks > 0 {
-                // Compute norm1 for first block
-                let blk0 = &this.model.blocks[0];
-                let ln_w = blk0.norm1.inner.gamma.val();
-                let ln_b = blk0.norm1.inner.beta.as_ref().unwrap().val();
-                let mut n1 = B::fused_layernorm(x.clone(), ln_w, ln_b, blk0.norm1.eps as f32);
+    // 4) Transformer blocks — use weight cache if available
+    if let Some(ref wc) = this.weight_cache {
+        // === Cached path: no Param::val() calls, pre-unsqueezed weights ===
+        let n_blocks = wc.blocks.len();
+        if n_blocks > 0 {
+            let blk0 = &wc.blocks[0];
+            let mut n1 = B::fused_layernorm(x.clone(), blk0.norm1_weight.clone(), blk0.norm1_bias.clone(), blk0.norm1_eps);
 
-                for i in 0..n_blocks - 1 {
-                    let blk = &this.model.blocks[i];
-                    let next_blk = &this.model.blocks[i + 1];
-                    let next_ln_w = next_blk.norm1.inner.gamma.val();
-                    let next_ln_b = next_blk.norm1.inner.beta.as_ref().unwrap().val();
-                    let next_eps = next_blk.norm1.eps as f32;
-
-                    // Forward with chained norm: fuses FC2 residual with next norm1
-                    let (out, next_n1) = blk.forward_with_norm1_chain(
-                        x, n1, next_ln_w, next_ln_b, next_eps,
-                    );
-                    x = out;
-                    n1 = next_n1;
-                }
-
-                // Last block — no next block to chain with
-                x = this.model.blocks[n_blocks - 1].forward_with_norm1(x, n1);
+            for i in 0..n_blocks - 1 {
+                let bw = &wc.blocks[i];
+                let next_bw = &wc.blocks[i + 1];
+                let (out, next_n1) = forward_block_cached::<B>(
+                    x, n1, bw,
+                    Some((&next_bw.norm1_weight, &next_bw.norm1_bias, next_bw.norm1_eps)),
+                );
+                x = out;
+                n1 = next_n1.unwrap();
             }
 
-            // 5) Output — use fused layernorm for final norm
-            if this.model.global_pool {
-                let x = x.narrow(1, 1, seq_total);
-                x.mean_dim(1).reshape([b, dmodel])
-            } else {
-                let norm = this.model.norm.as_ref().unwrap();
-                let ln_w = norm.inner.gamma.val();
-                let ln_b = norm.inner.beta.as_ref().unwrap().val();
-                let x = B::fused_layernorm(x, ln_w, ln_b, norm.eps as f32);
-                x.narrow(1, 0, 1).reshape([b, dmodel])
-            }
+            let (out, _) = forward_block_cached::<B>(
+                x, n1, &wc.blocks[n_blocks - 1], None,
+            );
+            x = out;
         }
-    };
+
+        // 5) Output
+        if this.model.global_pool {
+            let x = x.narrow(1, 1, seq_total);
+            x.mean_dim(1).reshape([b, dmodel])
+        } else {
+            let x = B::fused_layernorm(x,
+                wc.final_norm_weight.clone().unwrap(),
+                wc.final_norm_bias.clone().unwrap(),
+                wc.final_norm_eps,
+            );
+            x.narrow(1, 0, 1).reshape([b, dmodel])
+        }
+    } else {
+        // === Fallback: extract weights on each call (no cache built yet) ===
+        let n_blocks = this.model.blocks.len();
+        if n_blocks > 0 {
+            let blk0 = &this.model.blocks[0];
+            let ln_w = blk0.norm1.inner.gamma.val();
+            let ln_b = blk0.norm1.inner.beta.as_ref().unwrap().val();
+            let mut n1 = B::fused_layernorm(x.clone(), ln_w, ln_b, blk0.norm1.eps as f32);
+
+            for i in 0..n_blocks - 1 {
+                let blk = &this.model.blocks[i];
+                let next_blk = &this.model.blocks[i + 1];
+                let next_ln_w = next_blk.norm1.inner.gamma.val();
+                let next_ln_b = next_blk.norm1.inner.beta.as_ref().unwrap().val();
+                let next_eps = next_blk.norm1.eps as f32;
+                let (out, next_n1) = blk.forward_with_norm1_chain(
+                    x, n1, next_ln_w, next_ln_b, next_eps,
+                );
+                x = out;
+                n1 = next_n1;
+            }
+            x = this.model.blocks[n_blocks - 1].forward_with_norm1(x, n1);
+        }
+
+        if this.model.global_pool {
+            let x = x.narrow(1, 1, seq_total);
+            x.mean_dim(1).reshape([b, dmodel])
+        } else {
+            let norm = this.model.norm.as_ref().unwrap();
+            let ln_w = norm.inner.gamma.val();
+            let ln_b = norm.inner.beta.as_ref().unwrap().val();
+            let x = B::fused_layernorm(x, ln_w, ln_b, norm.eps as f32);
+            x.narrow(1, 0, 1).reshape([b, dmodel])
+        }
+    }
 }
 
+/// Forward a single transformer block using cached weights.
+/// Returns (block_output, optional_next_norm1).
 #[cfg(feature = "wgpu-kernels")]
-define_forward_features_fused!();
+fn forward_block_cached<B: Backend + super::FusedOps>(
+    x: Tensor<B, 3>,
+    n1: Tensor<B, 3>,
+    bw: &BlockWeightCache<B>,
+    next_ln: Option<(&Tensor<B, 1>, &Tensor<B, 1>, f32)>,
+) -> (Tensor<B, 3>, Option<Tensor<B, 3>>) {
+    // Attention sublayer (using cached pre-unsqueezed weights)
+    let qkv = n1.matmul(bw.qkv_w.clone());  // [B, S, 3D]
+    let (q, k_t, v) = B::fused_split_qkv_scaled(qkv, bw.qkv_bias.clone(), bw.n_heads, bw.head_dim, bw.scale);
+    let out = B::fused_flash_attention(q, k_t, v);
+    let out = B::fused_merge_heads(out, bw.n_heads, bw.head_dim);
+    let attn_matmul = out.matmul(bw.proj_w.clone());
+
+    // Bias + residual + LayerNorm(norm2)
+    let (h_sum, n2) = B::fused_bias_residual_add_layernorm(
+        x, attn_matmul, bw.proj_bias.clone(),
+        bw.norm2_weight.clone(), bw.norm2_bias.clone(), bw.norm2_eps,
+    );
+
+    // FFN sublayer (using cached pre-unsqueezed weights)
+    let h = n2.matmul(bw.fc1_w.clone());
+    let h = B::fused_bias_gelu(h, bw.fc1_bias.clone());
+    let mlp_matmul = h.matmul(bw.fc2_w.clone());
+
+    // Final residual + optional next-block norm1 fusion
+    if let Some((next_w, next_b, next_eps)) = next_ln {
+        let (out, next_n1) = B::fused_bias_residual_add_layernorm(
+            h_sum, mlp_matmul, bw.fc2_bias.clone(),
+            next_w.clone(), next_b.clone(), next_eps,
+        );
+        (out, Some(next_n1))
+    } else {
+        let out = B::fused_bias_residual_add(h_sum, mlp_matmul, bw.fc2_bias.clone());
+        (out, None)
+    }
+}

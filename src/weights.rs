@@ -250,6 +250,7 @@ fn load_encoder_weights<B: Backend>(
     // Rebuild CLS+PE cache if CLS token was loaded
     if cls_loaded {
         crate::model::steegformer::STEEGFormer::rebuild_cls_cache(steeg);
+        crate::model::steegformer::STEEGFormer::build_weight_cache(steeg);
     }
 
     Ok(())

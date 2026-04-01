@@ -79,11 +79,11 @@ pub trait FusedOps: Backend {
     ) -> (Tensor<Self, 3>, Tensor<Self, 3>);
 
     /// Flash attention: fused Q×K^T → softmax → attn×V in one kernel.
-    /// Q must be pre-scaled. Avoids materializing S×S attention matrix.
-    /// Q, K, V: [B, H, S, dh] → O: [B, H, S, dh]
+    /// Q must be pre-scaled. K_T is pre-transposed: [B, H, dh, S].
+    /// Q: [B, H, S, dh], K_T: [B, H, dh, S], V: [B, H, S, dh] → O: [B, H, S, dh]
     fn fused_flash_attention(
         q: Tensor<Self, 4>,
-        k: Tensor<Self, 4>,
+        k_t: Tensor<Self, 4>,
         v: Tensor<Self, 4>,
     ) -> Tensor<Self, 4>;
 }
@@ -186,11 +186,12 @@ fn bias_residual_add_layernorm_standard<B: Backend>(
 
 fn flash_attention_standard<B: Backend>(
     q: Tensor<B, 4>,
-    k: Tensor<B, 4>,
+    k_t: Tensor<B, 4>,
     v: Tensor<B, 4>,
 ) -> Tensor<B, 4> {
     // Fallback: decomposed Q×K^T → softmax → attn×V
-    let scores = q.matmul(k.swap_dims(2, 3));
+    // k_t is already [B, H, dh, S] (pre-transposed by split_qkv_scaled)
+    let scores = q.matmul(k_t);
     let attn = burn::tensor::activation::softmax(scores, 3);
     attn.matmul(v)
 }
@@ -334,10 +335,16 @@ mod cube_impls {
 
         fn fused_flash_attention(
             q: Tensor<Self, 4>,
-            k: Tensor<Self, 4>,
+            k_t: Tensor<Self, 4>,
             v: Tensor<Self, 4>,
         ) -> Tensor<Self, 4> {
-            wrap(kernels::launch_flash_attention(cube(q), cube(k), cube(v)))
+            // Decomposed: Q×K_T → fused_softmax → attn×V
+            // k_t is already [B, H, dh, S] so no swap_dims copy needed.
+            // The autotuned matmul kernels outperform our custom flash attention
+            // kernel for S≤1057 because they use register tiling.
+            let scores = q.matmul(k_t);  // [B, H, S, S]
+            let attn = Self::fused_softmax(scores, 3);
+            attn.matmul(v)  // [B, H, S, dh]
         }
     }
 }
@@ -408,10 +415,10 @@ macro_rules! impl_standard {
             }
             fn fused_flash_attention(
                 q: Tensor<Self, 4>,
-                k: Tensor<Self, 4>,
+                k_t: Tensor<Self, 4>,
                 v: Tensor<Self, 4>,
             ) -> Tensor<Self, 4> {
-                flash_attention_standard(q, k, v)
+                flash_attention_standard(q, k_t, v)
             }
         }
     };

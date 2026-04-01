@@ -82,9 +82,8 @@ impl<B: Backend + super::FusedOps> MultiHeadSelfAttention<B> {
 
         // Attention: Q × K^T → softmax → attn × V
         // k_t is already [B, H, dh, S], no swap_dims copy needed!
-        let scores = q.matmul(k_t);  // [B, H, S, S]
-        let attn = B::fused_softmax(scores, 3);
-        let out = attn.matmul(v);  // [B, H, S, dh]
+        // Use fused flash attention when available (1 dispatch vs 3)
+        let out = B::fused_flash_attention(q, k_t, v);  // [B, H, S, dh]
 
         // Fused merge heads: [B, H, S, dh] → [B, S, D] (1 dispatch)
         let out = B::fused_merge_heads(out, h, dh);
