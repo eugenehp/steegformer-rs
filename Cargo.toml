@@ -95,3 +95,7 @@ bytemuck = { version = "1", features = ["derive"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[patch.crates-io]
+cubek-matmul = { path = "vendor/cubek-matmul" }
+cubecl-cpp = { path = "vendor/cubecl-cpp" }
