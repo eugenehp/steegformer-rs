@@ -426,29 +426,27 @@ fn bias_gelu_kernel<F: Float>(
     x: &Tensor<F>,
     bias: &Tensor<F>,
     out: &mut Tensor<F>,
-    bias_dim: u32,
     total: usize,
+    #[comptime] bias_dim: u32,
 ) {
     let base = ABSOLUTE_POS * 4;
     let coeff = F::new(1.702);
+    // comptime bias_dim: compiler sees constant, converts % to & for power-of-2
+    let mask = comptime![bias_dim - 1];
     if base < total {
-        let bias_idx0 = (base as u32) % bias_dim;
-        let v0 = x[base] + bias[bias_idx0 as usize];
+        let v0 = x[base] + bias[((base as u32) & mask) as usize];
         out[base] = v0 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v0));
     }
     if base + 1 < total {
-        let bias_idx1 = ((base + 1) as u32) % bias_dim;
-        let v1 = x[base + 1] + bias[bias_idx1 as usize];
+        let v1 = x[base + 1] + bias[(((base + 1) as u32) & mask) as usize];
         out[base + 1] = v1 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v1));
     }
     if base + 2 < total {
-        let bias_idx2 = ((base + 2) as u32) % bias_dim;
-        let v2 = x[base + 2] + bias[bias_idx2 as usize];
+        let v2 = x[base + 2] + bias[(((base + 2) as u32) & mask) as usize];
         out[base + 2] = v2 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v2));
     }
     if base + 3 < total {
-        let bias_idx3 = ((base + 3) as u32) % bias_dim;
-        let v3 = x[base + 3] + bias[bias_idx3 as usize];
+        let v3 = x[base + 3] + bias[(((base + 3) as u32) & mask) as usize];
         out[base + 3] = v3 / (F::new(1.0) + F::exp(F::new(0.0) - coeff * v3));
     }
 }
@@ -476,8 +474,8 @@ pub fn launch_bias_gelu(
                 TensorArg::from_raw_parts::<f32>(&x.handle, &x.strides, &x.shape.dims, 1),
                 TensorArg::from_raw_parts::<f32>(&bias.handle, &bias.strides, &bias.shape.dims, 1),
                 TensorArg::from_raw_parts::<f32>(&out.handle, &out.strides, &out.shape.dims, 1),
-                ScalarArg::new(bias_dim),
                 ScalarArg::new(total),
+                bias_dim,  // #[comptime] — enables % → & for power-of-2
             ).expect("bias_gelu f32 launch");
         },
         DType::F16 => unsafe {
@@ -486,8 +484,8 @@ pub fn launch_bias_gelu(
                 TensorArg::from_raw_parts::<half::f16>(&x.handle, &x.strides, &x.shape.dims, 1),
                 TensorArg::from_raw_parts::<half::f16>(&bias.handle, &bias.strides, &bias.shape.dims, 1),
                 TensorArg::from_raw_parts::<half::f16>(&out.handle, &out.strides, &out.shape.dims, 1),
-                ScalarArg::new(bias_dim),
                 ScalarArg::new(total),
+                bias_dim,  // #[comptime]
             ).expect("bias_gelu f16 launch");
         },
         dt => panic!("bias_gelu: unsupported dtype {dt:?}"),
@@ -705,31 +703,29 @@ pub fn launch_merge_heads(
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Fused bias + residual add, 4 elements per thread.
+/// #[comptime] bias_dim enables modulo → bitwise AND optimization.
 #[cube(launch)]
 fn bias_residual_add_kernel<F: Float>(
     residual: &Tensor<F>,
     matmul_out: &Tensor<F>,
     bias: &Tensor<F>,
     out: &mut Tensor<F>,
-    bias_dim: u32,
     total: usize,
+    #[comptime] bias_dim: u32,
 ) {
     let base = ABSOLUTE_POS * 4;
+    let mask = comptime![bias_dim - 1];
     if base < total {
-        let idx = (base as u32) % bias_dim;
-        out[base] = residual[base] + matmul_out[base] + bias[idx as usize];
+        out[base] = residual[base] + matmul_out[base] + bias[((base as u32) & mask) as usize];
     }
     if base + 1 < total {
-        let idx = ((base + 1) as u32) % bias_dim;
-        out[base + 1] = residual[base + 1] + matmul_out[base + 1] + bias[idx as usize];
+        out[base + 1] = residual[base + 1] + matmul_out[base + 1] + bias[(((base + 1) as u32) & mask) as usize];
     }
     if base + 2 < total {
-        let idx = ((base + 2) as u32) % bias_dim;
-        out[base + 2] = residual[base + 2] + matmul_out[base + 2] + bias[idx as usize];
+        out[base + 2] = residual[base + 2] + matmul_out[base + 2] + bias[(((base + 2) as u32) & mask) as usize];
     }
     if base + 3 < total {
-        let idx = ((base + 3) as u32) % bias_dim;
-        out[base + 3] = residual[base + 3] + matmul_out[base + 3] + bias[idx as usize];
+        out[base + 3] = residual[base + 3] + matmul_out[base + 3] + bias[(((base + 3) as u32) & mask) as usize];
     }
 }
 
@@ -760,8 +756,8 @@ pub fn launch_bias_residual_add(
                 TensorArg::from_raw_parts::<f32>(&matmul_out.handle, &matmul_out.strides, &matmul_out.shape.dims, 1),
                 TensorArg::from_raw_parts::<f32>(&bias.handle, &bias.strides, &bias.shape.dims, 1),
                 TensorArg::from_raw_parts::<f32>(&out.handle, &out.strides, &out.shape.dims, 1),
-                ScalarArg::new(bias_dim),
                 ScalarArg::new(total),
+                bias_dim,  // #[comptime]
             ).expect("bias_residual_add f32 launch");
         },
         DType::F16 => unsafe {
@@ -771,8 +767,8 @@ pub fn launch_bias_residual_add(
                 TensorArg::from_raw_parts::<half::f16>(&matmul_out.handle, &matmul_out.strides, &matmul_out.shape.dims, 1),
                 TensorArg::from_raw_parts::<half::f16>(&bias.handle, &bias.strides, &bias.shape.dims, 1),
                 TensorArg::from_raw_parts::<half::f16>(&out.handle, &out.strides, &out.shape.dims, 1),
-                ScalarArg::new(bias_dim),
                 ScalarArg::new(total),
+                bias_dim,  // #[comptime]
             ).expect("bias_residual_add f16 launch");
         },
         dt => panic!("bias_residual_add: unsupported dtype {dt:?}"),
