@@ -10,7 +10,7 @@
 set -euo pipefail
 
 VARIANTS="${1:-small}"
-WARMUP="${2:-3}"
+WARMUP="${2:-10}"
 RUNS="${3:-10}"
 WEIGHTS="${4:-}"
 

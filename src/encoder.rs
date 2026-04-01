@@ -92,81 +92,91 @@ pub struct STEEGFormerEncoder<B: Backend> {
     device:    B::Device,
 }
 
+macro_rules! impl_encoder {
+    ($($bound:tt)*) => {
+        /// Load model from config.json and weights safetensors.
+        pub fn load(
+            config_path:  &Path,
+            weights_path: &Path,
+            device:       B::Device,
+        ) -> anyhow::Result<(Self, f64)> {
+            let cfg_str = std::fs::read_to_string(config_path)
+                .with_context(|| format!("config: {}", config_path.display()))?;
+            let hf_val: serde_json::Value = serde_json::from_str(&cfg_str)?;
+            let model_cfg: ModelConfig = serde_json::from_value(
+                hf_val.get("model").cloned().unwrap_or(hf_val.clone())
+            ).context("parsing model config")?;
+
+            let t = Instant::now();
+            let steeg = load_model::<B>(
+                &model_cfg,
+                weights_path.to_str().context("weights path not valid UTF-8")?,
+                &device,
+            )?;
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+
+            Ok((Self { steeg, model_cfg, data_cfg: DataConfig::default(), device }, ms))
+        }
+
+        /// Load from a ModelConfig directly (no config.json file needed).
+        pub fn load_from_config(
+            cfg: ModelConfig,
+            weights_path: &Path,
+            device: B::Device,
+        ) -> anyhow::Result<(Self, f64)> {
+            let t = Instant::now();
+            let steeg = load_model::<B>(
+                &cfg,
+                weights_path.to_str().context("weights path not valid UTF-8")?,
+                &device,
+            )?;
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+
+            Ok((Self { steeg, model_cfg: cfg, data_cfg: DataConfig::default(), device }, ms))
+        }
+
+        pub fn describe(&self) -> String {
+            let c = &self.model_cfg;
+            format!(
+                "ST-EEGFormer  embed_dim={}  depth={}  heads={}  patch={}  classes={}  pool={}",
+                c.embed_dim, c.depth, c.num_heads, c.patch_size, c.num_classes,
+                if c.global_pool { "global" } else { "cls" },
+            )
+        }
+
+        /// Run inference on a prepared InputBatch.
+        pub fn run_batch(&self, batch: &InputBatch<B>) -> anyhow::Result<SegmentEmbedding> {
+            let signal = channel_wise_normalize(batch.signal.clone());
+            let output = self.steeg.forward(signal, batch.channel_indices.clone());
+
+            let shape = output.dims().to_vec();
+            let output_vec = output
+                .into_data()
+                .to_vec::<f32>()
+                .map_err(|e| anyhow::anyhow!("output→vec: {e:?}"))?;
+
+            Ok(SegmentEmbedding {
+                output: output_vec,
+                shape: shape[1..].to_vec(),
+                n_channels: batch.n_channels,
+            })
+        }
+
+        /// Run on multiple batches.
+        pub fn run_batches(&self, batches: &[InputBatch<B>]) -> anyhow::Result<Vec<SegmentEmbedding>> {
+            batches.iter().map(|b| self.run_batch(b)).collect()
+        }
+
+        pub fn device(&self) -> &B::Device { &self.device }
+    };
+}
+
+#[cfg(not(feature = "wgpu-kernels"))]
 impl<B: Backend> STEEGFormerEncoder<B> {
-    /// Load model from config.json and weights safetensors.
-    pub fn load(
-        config_path:  &Path,
-        weights_path: &Path,
-        device:       B::Device,
-    ) -> anyhow::Result<(Self, f64)> {
-        let cfg_str = std::fs::read_to_string(config_path)
-            .with_context(|| format!("config: {}", config_path.display()))?;
-        let hf_val: serde_json::Value = serde_json::from_str(&cfg_str)?;
-        let model_cfg: ModelConfig = serde_json::from_value(
-            hf_val.get("model").cloned().unwrap_or(hf_val.clone())
-        ).context("parsing model config")?;
+    impl_encoder!();
+}
 
-        let t = Instant::now();
-        let steeg = load_model::<B>(
-            &model_cfg,
-            weights_path.to_str().context("weights path not valid UTF-8")?,
-            &device,
-        )?;
-        let ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        Ok((Self { steeg, model_cfg, data_cfg: DataConfig::default(), device }, ms))
-    }
-
-    /// Load from a ModelConfig directly (no config.json file needed).
-    pub fn load_from_config(
-        cfg: ModelConfig,
-        weights_path: &Path,
-        device: B::Device,
-    ) -> anyhow::Result<(Self, f64)> {
-        let t = Instant::now();
-        let steeg = load_model::<B>(
-            &cfg,
-            weights_path.to_str().context("weights path not valid UTF-8")?,
-            &device,
-        )?;
-        let ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        Ok((Self { steeg, model_cfg: cfg, data_cfg: DataConfig::default(), device }, ms))
-    }
-
-    pub fn describe(&self) -> String {
-        let c = &self.model_cfg;
-        format!(
-            "ST-EEGFormer  embed_dim={}  depth={}  heads={}  patch={}  classes={}  pool={}",
-            c.embed_dim, c.depth, c.num_heads, c.patch_size, c.num_classes,
-            if c.global_pool { "global" } else { "cls" },
-        )
-    }
-
-    /// Run inference on a prepared InputBatch.
-    pub fn run_batch(&self, batch: &InputBatch<B>) -> anyhow::Result<SegmentEmbedding> {
-        // Channel-wise z-score normalisation
-        let signal = channel_wise_normalize(batch.signal.clone());
-
-        let output = self.steeg.forward(signal, batch.channel_indices.clone());
-
-        let shape = output.dims().to_vec();
-        let output_vec = output
-            .into_data()
-            .to_vec::<f32>()
-            .map_err(|e| anyhow::anyhow!("output→vec: {e:?}"))?;
-
-        Ok(SegmentEmbedding {
-            output: output_vec,
-            shape: shape[1..].to_vec(),  // remove batch dim
-            n_channels: batch.n_channels,
-        })
-    }
-
-    /// Run on multiple batches.
-    pub fn run_batches(&self, batches: &[InputBatch<B>]) -> anyhow::Result<Vec<SegmentEmbedding>> {
-        batches.iter().map(|b| self.run_batch(b)).collect()
-    }
-
-    pub fn device(&self) -> &B::Device { &self.device }
+#[cfg(feature = "wgpu-kernels")]
+impl<B: Backend + crate::model::FusedOps> STEEGFormerEncoder<B> {
+    impl_encoder!(+ crate::model::FusedOps);
 }

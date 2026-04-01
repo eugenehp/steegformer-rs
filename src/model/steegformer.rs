@@ -5,6 +5,12 @@
 ///   - Channel embedding tiled via expand (no allocations)
 ///   - CLS token PE pre-added at load time
 ///   - Attention: scale fused into Q
+///
+/// With `wgpu-kernels`:
+///   - LayerNorm: fused single-pass CubeCL kernel (17× calls, saves ~136 dispatches)
+///   - Softmax:   fused CubeCL kernel (8× calls, saves ~32 dispatches)
+///   - GELU:      fused CubeCL kernel (8× calls, saves ~16 dispatches)
+///   Total: ~330 dispatches → ~145 dispatches (~56% reduction)
 
 use burn::prelude::*;
 use burn::module::{Param, ParamId};
@@ -16,7 +22,7 @@ use crate::model::encoder_block::EncoderBlock;
 use crate::model::norm::SteegLayerNorm;
 use crate::config::ModelConfig;
 
-// ── STEEGFormer Model ─────────────────────────────────────────────────────────
+// ── STEEGFormer Model ─────────────────────────────────────────────────────
 
 #[derive(Module, Debug)]
 pub struct STEEGFormer<B: Backend> {
@@ -38,7 +44,7 @@ pub struct STEEGFormerWithPE<B: Backend> {
     pub model: STEEGFormer<B>,
     pub temporal_pe: TemporalPositionalEncoding<B>,
     /// Pre-computed CLS token with PE already added: [1, 1, D]
-    cls_with_pe: Tensor<B, 3>,
+    pub cls_with_pe: Tensor<B, 3>,
 }
 
 impl<B: Backend> STEEGFormer<B> {
@@ -99,6 +105,8 @@ impl<B: Backend> STEEGFormer<B> {
     }
 }
 
+// ── Standard forward (no fused kernels) ───────────────────────────────────
+#[cfg(not(feature = "wgpu-kernels"))]
 impl<B: Backend> STEEGFormerWithPE<B> {
     /// Forward pass: extract features.
     ///
@@ -111,50 +119,7 @@ impl<B: Backend> STEEGFormerWithPE<B> {
         eeg: Tensor<B, 3>,
         chan_idx: Tensor<B, 2, Int>,
     ) -> Tensor<B, 2> {
-        let [b, _c, _t] = eeg.dims();
-        let dmodel = self.model.embed_dim;
-
-        // 1) Patch embed: [B, C, T] → [B, Seq, Ch, D]
-        let x = self.model.patch_embed.forward(eeg.clone());
-        let [_, seq, ch_all, _] = x.dims();
-        let seq_total = seq * ch_all;
-
-        // Flatten to [B, Seq_total, D]
-        let mut x = x.reshape([b, seq_total, dmodel]);
-
-        // 2a) Channel embeddings — expand (no allocation, just strided view)
-        let ch_emb_small = self.model.channel_embed.forward(chan_idx);
-        let ch_emb = ch_emb_small
-            .unsqueeze_dim::<4>(1)
-            .expand([b, seq, ch_all, dmodel])
-            .reshape([b, seq_total, dmodel]);
-
-        // 2b) Temporal embeddings — slice from pre-computed PE buffer
-        let tp_emb = self.temporal_pe.get_tiled(seq, ch_all, dmodel, &eeg.device());
-        let tp_emb = tp_emb
-            .unsqueeze_dim::<3>(0)
-            .expand([b, seq_total, dmodel]);
-
-        // 2c) Add positional encodings (single fused add)
-        x = x + tp_emb + ch_emb;
-
-        // 3) Prepend CLS token (pre-computed with PE)
-        let cls_tokens = self.cls_with_pe.clone().expand([b, 1, dmodel]);
-        x = Tensor::cat(vec![cls_tokens, x], 1);
-
-        // 4) Transformer blocks
-        for blk in &self.model.blocks {
-            x = blk.forward(x);
-        }
-
-        // 5) Output
-        if self.model.global_pool {
-            let x = x.narrow(1, 1, seq_total);
-            x.mean_dim(1).reshape([b, dmodel])
-        } else {
-            let x = self.model.norm.as_ref().unwrap().forward(x);
-            x.narrow(1, 0, 1).reshape([b, dmodel])
-        }
+        forward_features_impl(self, eeg, chan_idx)
     }
 
     /// Forward pass with optional classification head.
@@ -175,3 +140,164 @@ impl<B: Backend> STEEGFormerWithPE<B> {
         self.model.embed_dim
     }
 }
+
+// ── Fused forward (CubeCL kernels) ────────────────────────────────────────
+#[cfg(feature = "wgpu-kernels")]
+impl<B: Backend + super::FusedOps> STEEGFormerWithPE<B> {
+    pub fn forward_features(
+        &self,
+        eeg: Tensor<B, 3>,
+        chan_idx: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 2> {
+        forward_features_impl(self, eeg, chan_idx)
+    }
+
+    pub fn forward(
+        &self,
+        eeg: Tensor<B, 3>,
+        chan_idx: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 2> {
+        let features = self.forward_features(eeg, chan_idx);
+        if let Some(ref head) = self.model.head {
+            head.forward(features)
+        } else {
+            features
+        }
+    }
+
+    pub fn embed_dim(&self) -> usize {
+        self.model.embed_dim
+    }
+}
+
+// ── Shared implementation (body is identical for both paths) ──────────────
+
+macro_rules! define_forward_features {
+    ($($bound:tt)*) => {
+        fn forward_features_impl<B: Backend $($bound)*>(
+            this: &STEEGFormerWithPE<B>,
+            eeg: Tensor<B, 3>,
+            chan_idx: Tensor<B, 2, Int>,
+        ) -> Tensor<B, 2> {
+            let [b, _c, _t] = eeg.dims();
+            let dmodel = this.model.embed_dim;
+
+            // 1) Patch embed: [B, C, T] → [B, Seq, Ch, D]
+            let x = this.model.patch_embed.forward(eeg.clone());
+            let [_, seq, ch_all, _] = x.dims();
+            let seq_total = seq * ch_all;
+
+            // 2) Add positional encodings using 4D broadcast (avoids expand+reshape copies)
+            //    x:      [B, Seq, Ch, D]
+            //    ch_emb: [B,  1,  Ch, D] — broadcasts over Seq
+            //    tp_emb: [1, Seq,  1, D] — broadcasts over B and Ch
+            //    Burn's fusion engine combines this into a single kernel dispatch.
+            let ch_emb = this.model.channel_embed.forward(chan_idx)
+                .unsqueeze_dim::<4>(1);  // [B, 1, Ch, D]
+            let tp_emb = this.temporal_pe.pe.clone()
+                .narrow(0, 0, seq)          // [Seq, D]
+                .unsqueeze_dim::<3>(1)      // [Seq, 1, D]
+                .unsqueeze_dim::<4>(0);     // [1, Seq, 1, D]
+            let x = (x + ch_emb + tp_emb)
+                .reshape([b, seq_total, dmodel]);
+
+            // 3) Prepend CLS token (pre-computed with PE)
+            let cls_tokens = this.cls_with_pe.clone().expand([b, 1, dmodel]);
+            let mut x = Tensor::cat(vec![cls_tokens, x], 1);
+
+            // 4) Transformer blocks
+            for blk in &this.model.blocks {
+                x = blk.forward(x);
+            }
+
+            // 5) Output
+            if this.model.global_pool {
+                let x = x.narrow(1, 1, seq_total);
+                x.mean_dim(1).reshape([b, dmodel])
+            } else {
+                let x = this.model.norm.as_ref().unwrap().forward(x);
+                x.narrow(1, 0, 1).reshape([b, dmodel])
+            }
+        }
+    };
+}
+
+#[cfg(not(feature = "wgpu-kernels"))]
+define_forward_features!();
+
+/// Fused version that chains blocks: the last dispatch of block N fuses with
+/// norm1 of block N+1, saving 1 layernorm dispatch per block boundary (7 saves).
+#[cfg(feature = "wgpu-kernels")]
+macro_rules! define_forward_features_fused {
+    () => {
+        fn forward_features_impl<B: Backend + super::FusedOps>(
+            this: &STEEGFormerWithPE<B>,
+            eeg: Tensor<B, 3>,
+            chan_idx: Tensor<B, 2, Int>,
+        ) -> Tensor<B, 2> {
+            let [b, _c, t] = eeg.dims();
+            let dmodel = this.model.embed_dim;
+            let patch_size = this.model.patch_size;
+            let n_channels = chan_idx.dims()[1];
+            let num_patches = t / patch_size;
+            let seq_total = num_patches * n_channels;
+
+            // 1-3) Patch embed + positional encoding + CLS prepend
+            let x = this.model.patch_embed.forward(eeg.clone());
+            let [_, seq, ch_all, _] = x.dims();
+            let ch_emb = this.model.channel_embed.forward(chan_idx)
+                .unsqueeze_dim::<4>(1);
+            let tp_emb = this.temporal_pe.pe.clone()
+                .narrow(0, 0, seq)
+                .unsqueeze_dim::<3>(1)
+                .unsqueeze_dim::<4>(0);
+            let x = (x + ch_emb + tp_emb)
+                .reshape([b, seq_total, dmodel]);
+            let cls_tokens = this.cls_with_pe.clone().expand([b, 1, dmodel]);
+            let mut x = Tensor::cat(vec![cls_tokens, x], 1);
+
+            // 4) Transformer blocks — chained with cross-block norm fusion
+            let n_blocks = this.model.blocks.len();
+            if n_blocks > 0 {
+                // Compute norm1 for first block
+                let blk0 = &this.model.blocks[0];
+                let ln_w = blk0.norm1.inner.gamma.val();
+                let ln_b = blk0.norm1.inner.beta.as_ref().unwrap().val();
+                let mut n1 = B::fused_layernorm(x.clone(), ln_w, ln_b, blk0.norm1.eps as f32);
+
+                for i in 0..n_blocks - 1 {
+                    let blk = &this.model.blocks[i];
+                    let next_blk = &this.model.blocks[i + 1];
+                    let next_ln_w = next_blk.norm1.inner.gamma.val();
+                    let next_ln_b = next_blk.norm1.inner.beta.as_ref().unwrap().val();
+                    let next_eps = next_blk.norm1.eps as f32;
+
+                    // Forward with chained norm: fuses FC2 residual with next norm1
+                    let (out, next_n1) = blk.forward_with_norm1_chain(
+                        x, n1, next_ln_w, next_ln_b, next_eps,
+                    );
+                    x = out;
+                    n1 = next_n1;
+                }
+
+                // Last block — no next block to chain with
+                x = this.model.blocks[n_blocks - 1].forward_with_norm1(x, n1);
+            }
+
+            // 5) Output — use fused layernorm for final norm
+            if this.model.global_pool {
+                let x = x.narrow(1, 1, seq_total);
+                x.mean_dim(1).reshape([b, dmodel])
+            } else {
+                let norm = this.model.norm.as_ref().unwrap();
+                let ln_w = norm.inner.gamma.val();
+                let ln_b = norm.inner.beta.as_ref().unwrap().val();
+                let x = B::fused_layernorm(x, ln_w, ln_b, norm.eps as f32);
+                x.narrow(1, 0, 1).reshape([b, dmodel])
+            }
+        }
+    };
+}
+
+#[cfg(feature = "wgpu-kernels")]
+define_forward_features_fused!();

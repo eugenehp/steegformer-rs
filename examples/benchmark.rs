@@ -14,7 +14,23 @@ use steegformer::model::steegformer::STEEGFormer;
 use steegformer::weights::{WeightMap, load_model_from_wm};
 
 // ── Backend dispatch ──────────────────────────────────────────────────────────
-#[cfg(all(feature = "wgpu", not(feature = "ndarray")))]
+// When wgpu-kernels is enabled, use CubeBackend directly (not the Wgpu fusion wrapper)
+// so custom CubeCL kernels actually fire.
+#[cfg(all(feature = "wgpu-kernels", feature = "wgpu-kernels-f16"))]
+mod backend {
+    pub type B = burn::backend::wgpu::CubeBackend<cubecl::wgpu::WgpuRuntime, half::f16, i32, u32>;
+    pub fn device() -> burn::backend::wgpu::WgpuDevice { burn::backend::wgpu::WgpuDevice::DefaultDevice }
+    pub const NAME: &str = "GPU (wgpu — Metal / MSL + Fused CubeCL f16)";
+}
+
+#[cfg(all(feature = "wgpu-kernels", not(feature = "wgpu-kernels-f16")))]
+mod backend {
+    pub type B = burn::backend::wgpu::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
+    pub fn device() -> burn::backend::wgpu::WgpuDevice { burn::backend::wgpu::WgpuDevice::DefaultDevice }
+    pub const NAME: &str = "GPU (wgpu — Metal / MSL + Fused CubeCL)";
+}
+
+#[cfg(all(feature = "wgpu", not(feature = "ndarray"), not(feature = "wgpu-kernels")))]
 mod backend {
     pub use burn::backend::{Wgpu as B, wgpu::WgpuDevice};
     pub fn device() -> WgpuDevice { WgpuDevice::DefaultDevice }
@@ -26,7 +42,7 @@ mod backend {
     pub const NAME: &str = "GPU (wgpu — WGSL)";
 }
 
-#[cfg(feature = "ndarray")]
+#[cfg(all(feature = "ndarray", not(feature = "wgpu"), not(feature = "wgpu-kernels")))]
 mod backend {
     pub use burn::backend::NdArray as B;
     pub fn device() -> burn::backend::ndarray::NdArrayDevice { burn::backend::ndarray::NdArrayDevice::Cpu }
@@ -49,8 +65,8 @@ struct Args {
     /// Path to safetensors weights (required for 'small' if present).
     #[arg(long)]
     weights: Option<String>,
-    /// Number of warmup runs.
-    #[arg(long, default_value_t = 3)]
+    /// Number of warmup runs (with GPU sync after each).
+    #[arg(long, default_value_t = 10)]
     warmup: usize,
     /// Number of timed runs.
     #[arg(long, default_value_t = 10)]
@@ -145,29 +161,25 @@ fn main() -> anyhow::Result<()> {
         );
         let signal_norm = data::channel_wise_normalize(batch.signal.clone());
 
-        // Warmup — run enough to let autotune settle all kernel configs.
-        // The first few runs trigger autotune profiling (expensive).
-        // We do extra warmup passes to ensure all kernels are cached.
+        // Warmup — sync after EVERY run so autotune gets accurate timing.
+        // Without per-run sync, autotune profiling data is unreliable,
+        // leading to suboptimal kernel selections and wild variance.
         if !json_mode {
             eprintln!("\n  ▸ Standard input: {}ch × {} samples", n_channels, n_samples);
-            eprintln!("    Warming up ({} runs)...", args.warmup);
+            eprintln!("    Warming up ({} runs with per-run sync)...", args.warmup);
         }
         for _ in 0..args.warmup {
-            let _ = steeg.forward(signal_norm.clone(), batch.channel_indices.clone());
-        }
-        // Force sync: read output to ensure all GPU work completes
-        {
             let out = steeg.forward(signal_norm.clone(), batch.channel_indices.clone());
-            let _ = out.into_data().to_vec::<f32>();
+            let _ = out.into_data().to_vec::<f32>();  // force GPU sync each warmup
         }
 
-        // Timed runs — each run forces a sync by reading output
+        // Timed runs — full GPU sync each run for accurate timing.
+        // Reading the FULL output (not narrow) ensures complete pipeline flush.
         let mut times = Vec::with_capacity(args.runs);
         for _ in 0..args.runs {
             let t = Instant::now();
             let out = steeg.forward(signal_norm.clone(), batch.channel_indices.clone());
-            // Force GPU sync by reading one element
-            let _ = out.narrow(1, 0, 1).into_data().to_vec::<f32>();
+            let _ = out.into_data().to_vec::<f32>();  // full sync
             times.push(t.elapsed().as_secs_f64() * 1000.0);
         }
         let mean_ms = times.iter().sum::<f64>() / times.len() as f64;
@@ -197,17 +209,17 @@ fn main() -> anyhow::Result<()> {
             let b = data::build_batch::<B>(sig, ch_indices, nc, n_samples, &device);
             let sn = data::channel_wise_normalize(b.signal.clone());
 
-            // Warmup (extra to settle autotune for this shape)
-            for _ in 0..3 {
-                let _ = steeg.forward(sn.clone(), b.channel_indices.clone());
+            // Warmup with per-run sync (settle autotune for this shape)
+            for _ in 0..5 {
+                let o = steeg.forward(sn.clone(), b.channel_indices.clone());
+                let _ = o.into_data().to_vec::<f32>();
             }
-            { let o = steeg.forward(sn.clone(), b.channel_indices.clone()); let _ = o.into_data().to_vec::<f32>(); }
 
             let mut t_vec = Vec::new();
-            for _ in 0..3.max(args.runs / 2) {
+            for _ in 0..5.max(args.runs / 2) {
                 let t = Instant::now();
                 let o = steeg.forward(sn.clone(), b.channel_indices.clone());
-                let _ = o.narrow(1, 0, 1).into_data().to_vec::<f32>();
+                let _ = o.into_data().to_vec::<f32>();  // full sync
                 t_vec.push(t.elapsed().as_secs_f64() * 1000.0);
             }
             let avg = t_vec.iter().sum::<f64>() / t_vec.len() as f64;
@@ -241,16 +253,17 @@ fn main() -> anyhow::Result<()> {
             let b = data::build_batch::<B>(sig, indices.clone(), n_channels, ns, &device);
             let sn = data::channel_wise_normalize(b.signal.clone());
 
-            for _ in 0..3 {
-                let _ = steeg.forward(sn.clone(), b.channel_indices.clone());
+            // Warmup with per-run sync
+            for _ in 0..5 {
+                let o = steeg.forward(sn.clone(), b.channel_indices.clone());
+                let _ = o.into_data().to_vec::<f32>();
             }
-            { let o = steeg.forward(sn.clone(), b.channel_indices.clone()); let _ = o.into_data().to_vec::<f32>(); }
 
             let mut t_vec = Vec::new();
-            for _ in 0..3.max(args.runs / 2) {
+            for _ in 0..5.max(args.runs / 2) {
                 let t = Instant::now();
                 let o = steeg.forward(sn.clone(), b.channel_indices.clone());
-                let _ = o.narrow(1, 0, 1).into_data().to_vec::<f32>();
+                let _ = o.into_data().to_vec::<f32>();  // full sync
                 t_vec.push(t.elapsed().as_secs_f64() * 1000.0);
             }
             let avg = t_vec.iter().sum::<f64>() / t_vec.len() as f64;
