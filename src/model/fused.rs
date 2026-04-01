@@ -337,12 +337,26 @@ mod cube_impls {
             k_t: Tensor<Self, 4>,
             v: Tensor<Self, 4>,
         ) -> Tensor<Self, 4> {
-            // Decomposed: Q×K_T → fused_softmax → attn×V
-            // k_t has swap_dims'd strides but contiguous base → cubecl sees
-            // MildlyPermuted{transposed:true} which enables CMMA strategies.
-            let scores = q.matmul(k_t);  // [B, H, S, S]
+            let [b, h, s, dh] = q.dims();
+            let bh = b * h;
+
+            // Use custom WMMA kernel for Q×K^T when dh is small and divisible by 8.
+            // cubecl's autotune falls back to scalar unit kernels for dh=64
+            // (CMMA strategies overflow 32KB shared memory).
+            // Our WMMA kernel loads tiles directly from device memory — no shared memory.
+            let scores = if dh <= 128 && dh % 8 == 0 {
+                // k_t is [B,H,dh,S] (swap_dims view of K[B,H,S,dh])
+                // Recover K in [BH, S, dh] contiguous layout for WMMA
+                let q_3d = cube(q.reshape([bh, s, dh]));
+                let k_3d = cube(k_t.swap_dims(2, 3).reshape([bh, s, dh]));
+                let scores_3d = kernels::launch_wmma_qkt(q_3d, k_3d, bh, s, s, dh);
+                wrap::<Self, 4>(scores_3d).reshape([b, h, s, s])
+            } else {
+                q.matmul(k_t)
+            };
+
             let attn = Self::fused_softmax(scores, 3);
-            attn.matmul(v)  // [B, H, S, dh]
+            attn.matmul(v)
         }
     }
 }

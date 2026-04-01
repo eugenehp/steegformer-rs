@@ -1261,3 +1261,106 @@ pub fn launch_flash_attention(
     }
     out
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// WMMA Batched Q×K^T — register-only, no shared memory
+// Uses simdgroup_matrix_8x8 on Metal. Bypasses cubecl autotune which
+// falls back to scalar unit kernels for small K (shared memory overflow).
+// ══════════════════════════════════════════════════════════════════════════
+
+#[cube]
+fn as_usize(v: u32) -> usize { usize::cast_from(v) }
+
+#[cube(launch)]
+fn wmma_qkt_kernel<F: Float>(
+    q: &Tensor<F>,       // [BH, M, K] contiguous
+    k: &Tensor<F>,       // [BH, N, K] contiguous
+    out: &mut Tensor<F>,  // [BH, M, N]
+    #[comptime] m_size: u32,
+    #[comptime] n_size: u32,
+    #[comptime] k_size: u32,
+) {
+    let bh = CUBE_POS_Z;
+    let row = CUBE_POS_Y * 8u32;
+    let col = CUBE_POS_X * 8u32;
+    if row >= m_size || col >= n_size { terminate!(); }
+
+    let acc = unsafe {
+        cmma::Matrix::<F>::uninitialized(
+            cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize, cmma::MatrixLayout::Undefined,
+        )
+    };
+    cmma::fill::<F>(&acc, F::new(0.0));
+
+    let q_base = bh * m_size * k_size;
+    let k_base = bh * n_size * k_size;
+    let tile_len = 8u32 * k_size;
+
+    let k_steps = comptime![k_size / 8];
+    for step in 0u32..k_steps {
+        let k_off = step * 8u32;
+
+        let a_mat = unsafe {
+            cmma::Matrix::<F>::uninitialized(
+                cmma::MatrixIdent::A, 8usize, 8usize, 8usize, cmma::MatrixLayout::RowMajor,
+            )
+        };
+        let qs = q_base + row * k_size + k_off;
+        let q_sl = q.slice(as_usize(qs), as_usize(qs + tile_len));
+        cmma::load::<F, F>(&a_mat, &q_sl, k_size);
+
+        let b_mat = unsafe {
+            cmma::Matrix::<F>::uninitialized(
+                cmma::MatrixIdent::B, 8usize, 8usize, 8usize, cmma::MatrixLayout::ColMajor,
+            )
+        };
+        let ks = k_base + col * k_size + k_off;
+        let k_sl = k.slice(as_usize(ks), as_usize(ks + tile_len));
+        cmma::load::<F, F>(&b_mat, &k_sl, k_size);
+
+        cmma::execute::<F, F, F, F>(&a_mat, &b_mat, &acc, &acc);
+    }
+
+    let os = bh * m_size * n_size + row * n_size + col;
+    let out_tile = 8u32 * n_size;
+    let mut out_sl = out.slice_mut(as_usize(os), as_usize(os + out_tile));
+    cmma::store::<F, F>(&mut out_sl, &acc, n_size, cmma::MatrixLayout::RowMajor);
+}
+
+pub fn launch_wmma_qkt(
+    q: CubeTensor<WgpuRuntime>, k: CubeTensor<WgpuRuntime>,
+    bh: usize, m: usize, n: usize, k_dim: usize,
+) -> CubeTensor<WgpuRuntime> {
+    let q = into_contiguous(q);
+    let k = into_contiguous(k);
+    let out = empty_cube_shape(&q, vec![bh, m, n]);
+    let tiles_n = ((n as u32) + 7) / 8;
+    let tiles_m = ((m as u32) + 7) / 8;
+    let cube_dim = CubeDim { x: 32, y: 1, z: 1 };
+    let cube_count = CubeCount::Static(tiles_n, tiles_m, bh as u32);
+    let sq = contiguous_strides(&[bh, m, k_dim]);
+    let sk = contiguous_strides(&[bh, n, k_dim]);
+    let so = contiguous_strides(&[bh, m, n]);
+    match q.dtype {
+        DType::F32 | DType::Flex32 => unsafe {
+            wmma_qkt_kernel::launch::<f32, WgpuRuntime>(
+                &q.client, cube_count, cube_dim,
+                TensorArg::from_raw_parts::<f32>(&q.handle, &sq, &[bh, m, k_dim], 1),
+                TensorArg::from_raw_parts::<f32>(&k.handle, &sk, &[bh, n, k_dim], 1),
+                TensorArg::from_raw_parts::<f32>(&out.handle, &so, &[bh, m, n], 1),
+                m as u32, n as u32, k_dim as u32,
+            ).expect("wmma_qkt launch");
+        },
+        DType::F16 => unsafe {
+            wmma_qkt_kernel::launch::<half::f16, WgpuRuntime>(
+                &q.client, cube_count, cube_dim,
+                TensorArg::from_raw_parts::<half::f16>(&q.handle, &sq, &[bh, m, k_dim], 1),
+                TensorArg::from_raw_parts::<half::f16>(&k.handle, &sk, &[bh, n, k_dim], 1),
+                TensorArg::from_raw_parts::<half::f16>(&out.handle, &so, &[bh, m, n], 1),
+                m as u32, n as u32, k_dim as u32,
+            ).expect("wmma_qkt launch");
+        },
+        dt => panic!("wmma_qkt: unsupported dtype {dt:?}"),
+    }
+    out
+}
