@@ -537,14 +537,15 @@ fn split_qkv_bias_scaled_kernel<F: Float>(
     let k_val = qkv[qkv_base + dim as usize] + bias[(dim + d_idx) as usize];
     let v_val = qkv[qkv_base + 2 * dim as usize] + bias[(2 * dim + d_idx) as usize];
 
-    // Q, V: write to [B, H, S, dh] (contiguous)
-    let qv_idx = (b * h_size * s_size * dh_size + h * s_size * dh_size + s * dh_size + j) as usize;
-    // K: write to [B, H, dh, S] (transposed) — avoids swap_dims copy dispatch
-    let k_idx = (b * h_size * dh_size * s_size + h * dh_size * s_size + j * s_size + s) as usize;
+    // Q, K, V all write to [B, H, S, dh] (contiguous)
+    // K is NOT pre-transposed — cubecl matmul handles transpose via
+    // swap_dims which preserves contiguous layout info for WMMA.
+    // Pre-transposing K caused 'HighlyPermuted' layout → blocked WMMA → 4× slower.
+    let out_idx = (b * h_size * s_size * dh_size + h * s_size * dh_size + s * dh_size + j) as usize;
 
-    q_out[qv_idx] = q_val * F::cast_from(scale);
-    k_out[k_idx] = k_val;
-    v_out[qv_idx] = v_val;
+    q_out[out_idx] = q_val * F::cast_from(scale);
+    k_out[out_idx] = k_val;
+    v_out[out_idx] = v_val;
 }
 
 /// Split QKV tensor and produce contiguous Q, K, V with Q pre-scaled.
@@ -564,11 +565,10 @@ pub fn launch_split_qkv_scaled(
     let b = dims[0];
     let s = dims[1];
 
-    let qv_shape = Shape::from(vec![b, n_heads, s, head_dim]);
-    let kt_shape = Shape::from(vec![b, n_heads, head_dim, s]);  // K transposed!
-    let q_out = empty_cube(&qkv, qv_shape.clone());
-    let k_out = empty_cube(&qkv, kt_shape);
-    let v_out = empty_cube(&qkv, qv_shape);
+    let out_shape = Shape::from(vec![b, n_heads, s, head_dim]);
+    let q_out = empty_cube(&qkv, out_shape.clone());
+    let k_out = empty_cube(&qkv, out_shape.clone());  // K in standard layout [B,H,S,dh]
+    let v_out = empty_cube(&qkv, out_shape);
 
     let total = b * s * n_heads * head_dim;
     let cube_dim_x: u32 = 256;

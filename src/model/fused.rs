@@ -143,10 +143,9 @@ fn split_qkv_scaled_standard<B: Backend>(
     let q = qkv.clone().narrow(2, 0, dim)
         .reshape([b, s, n_heads, head_dim]).swap_dims(1, 2)
         .mul_scalar(scale);
-    // K output transposed: [B, H, dh, S] — ready for Q×K^T matmul without swap_dims copy
+    // K in standard layout [B, H, S, dh] — swap_dims at matmul time preserves contiguity
     let k = qkv.clone().narrow(2, dim, dim)
-        .reshape([b, s, n_heads, head_dim]).swap_dims(1, 2)
-        .swap_dims(2, 3);  // [B, H, S, dh] → [B, H, dh, S]
+        .reshape([b, s, n_heads, head_dim]).swap_dims(1, 2);
     let v = qkv.narrow(2, dim * 2, dim)
         .reshape([b, s, n_heads, head_dim]).swap_dims(1, 2);
     (q, k, v)
@@ -190,7 +189,7 @@ fn flash_attention_standard<B: Backend>(
     v: Tensor<B, 4>,
 ) -> Tensor<B, 4> {
     // Fallback: decomposed Q×K^T → softmax → attn×V
-    // k_t is already [B, H, dh, S] (pre-transposed by split_qkv_scaled)
+    // k_t may be [B,H,dh,S] (swap_dims'd) or already transposed
     let scores = q.matmul(k_t);
     let attn = burn::tensor::activation::softmax(scores, 3);
     attn.matmul(v)

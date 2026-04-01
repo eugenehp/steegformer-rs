@@ -412,8 +412,9 @@ pub fn forward_block_cached<B: Backend + super::FusedOps>(
 ) -> (Tensor<B, 3>, Option<Tensor<B, 3>>) {
     // Attention sublayer (using cached pre-unsqueezed weights)
     let qkv = n1.matmul(bw.qkv_w.clone());  // [B, S, 3D]
-    let (q, k_t, v) = B::fused_split_qkv_scaled(qkv, bw.qkv_bias.clone(), bw.n_heads, bw.head_dim, bw.scale);
-    let out = B::fused_flash_attention(q, k_t, v);  // [B, H, S, dh]
+    let (q, k, v) = B::fused_split_qkv_scaled(qkv, bw.qkv_bias.clone(), bw.n_heads, bw.head_dim, bw.scale);
+    // K.swap_dims creates a strided view — cubecl sees contiguous base data → enables WMMA
+    let out = B::fused_flash_attention(q, k.swap_dims(2, 3), v);  // [B, H, S, dh]
     let out = B::fused_merge_heads(out, bw.n_heads, bw.head_dim);
     let attn_matmul = out.matmul(bw.proj_w.clone());
 

@@ -76,21 +76,21 @@ fn main() {
     });
 
     // 4. Attention (decomposed: matmul + softmax + matmul)
-    let (q, k_t, v) = B::fused_split_qkv_scaled(qkv.clone(), bw.qkv_bias.clone(), bw.n_heads, bw.head_dim, bw.scale);
+    let (q, k, v) = B::fused_split_qkv_scaled(qkv.clone(), bw.qkv_bias.clone(), bw.n_heads, bw.head_dim, bw.scale);
     let _ = q.to_data(); // sync
     bench("Q×K_T matmul [B,H,S,dh]×[B,H,dh,S]", warmup, runs, || {
-        let scores = q.clone().matmul(k_t.clone());
+        let scores = q.clone().matmul(k.clone().swap_dims(2, 3));
         sync4(&scores);
     });
 
     bench("fused_softmax [B,H,S,S]", warmup, runs, || {
-        let scores = q.clone().matmul(k_t.clone());
+        let scores = q.clone().matmul(k.clone().swap_dims(2, 3));
         let attn = B::fused_softmax(scores, 3);
         sync4(&attn);
     });
 
     bench("attn×V matmul [B,H,S,S]×[B,H,S,dh]", warmup, runs, || {
-        let scores = q.clone().matmul(k_t.clone());
+        let scores = q.clone().matmul(k.clone().swap_dims(2, 3));
         let attn = B::fused_softmax(scores, 3);
         let out = attn.matmul(v.clone());
         sync4(&out);
@@ -98,7 +98,7 @@ fn main() {
 
     // 5. Full attention (Q×K_T → softmax → attn×V)
     bench("full attention (3 dispatches)", warmup, runs, || {
-        let scores = q.clone().matmul(k_t.clone());
+        let scores = q.clone().matmul(k.clone().swap_dims(2, 3));
         let attn = B::fused_softmax(scores, 3);
         let out = attn.matmul(v.clone());
         sync4(&out);

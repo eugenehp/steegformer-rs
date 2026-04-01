@@ -75,15 +75,15 @@ impl<B: Backend + super::FusedOps> MultiHeadSelfAttention<B> {
         let qkv = x.matmul(qkv_w);       // [B, S, 3D]
         let qkv_bias = self.qkv.bias.as_ref().expect("qkv must have bias").val();
 
-        // Fused: bias + split + scale + K transpose in 1 dispatch.
-        // Q: [B, H, S, dh], K_T: [B, H, dh, S] (pre-transposed!), V: [B, H, S, dh]
-        // K is output transposed to avoid a separate swap_dims + into_contiguous copy.
-        let (q, k_t, v) = B::fused_split_qkv_scaled(qkv, qkv_bias, h, dh, self.scale);
+        // Fused: bias + split + scale in 1 dispatch.
+        // Q, K, V all [B, H, S, dh] (contiguous) — enables WMMA matmul.
+        let (q, k, v) = B::fused_split_qkv_scaled(qkv, qkv_bias, h, dh, self.scale);
 
         // Attention: Q × K^T → softmax → attn × V
-        // k_t is already [B, H, dh, S], no swap_dims copy needed!
-        // Use fused flash attention when available (1 dispatch vs 3)
-        let out = B::fused_flash_attention(q, k_t, v);  // [B, H, S, dh]
+        // K.swap_dims(2,3) creates a view with swapped strides (no copy).
+        // cubecl's matmul sees 'Contiguous' base layout → uses WMMA tiles.
+        // Previous K-transpose approach caused 'HighlyPermuted' → blocked WMMA → 4× slower.
+        let out = B::fused_flash_attention(q, k.swap_dims(2, 3), v);  // [B, H, S, dh]
 
         // Fused merge heads: [B, H, S, dh] → [B, S, D] (1 dispatch)
         let out = B::fused_merge_heads(out, h, dh);
