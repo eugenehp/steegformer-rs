@@ -1,6 +1,6 @@
 [package]
 name = "steegformer"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 description = "ST-EEGFormer EEG Foundation Model — inference in Rust with Burn ML"
 keywords      = ["eeg", "foundational", "BCI", "GPU", "CPU"]
@@ -8,11 +8,16 @@ categories    = ["science", "mathematics"]
 authors       = ["Eugene Hauptmann"]
 license       = "Apache-2.0"
 readme        = "README.md"
+repository    = "https://github.com/eugenehp/steegformer-rs"
+homepage      = "https://github.com/eugenehp/steegformer-rs"
 
 exclude = [
     "data/",
     "scripts/",
     "tests/vectors/",
+    "vendor/",
+    "bench_results/",
+    "figures/",
 ]
 
 [lib]
@@ -96,16 +101,17 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-[patch.crates-io]
-cubek-matmul = { path = "vendor/cubek-matmul" }
-cubecl-cpp = { path = "vendor/cubecl-cpp" }
-cubecl = { path = "vendor/cubecl" }
-cubecl-core = { path = "vendor/cubecl-core" }
-cubecl-ir = { path = "vendor/cubecl-ir" }
-cubecl-wgpu = { path = "vendor/cubecl-wgpu" }
-cubecl-std = { path = "vendor/cubecl-std" }
-cubecl-runtime = { path = "vendor/cubecl-runtime" }
-cubecl-macros = { path = "vendor/cubecl-macros" }
-cubecl-macros-internal = { path = "vendor/cubecl-macros-internal" }
-cubecl-opt = { path = "vendor/cubecl-opt" }
-cubecl-common = { path = "vendor/cubecl-common" }
+# Uncomment for vendored cubecl with custom WMMA Q×K^T kernel:
+# [patch.crates-io]
+# cubek-matmul = { path = "vendor/cubek-matmul" }
+# cubecl-cpp = { path = "vendor/cubecl-cpp" }
+# cubecl = { path = "vendor/cubecl" }
+# cubecl-core = { path = "vendor/cubecl-core" }
+# cubecl-ir = { path = "vendor/cubecl-ir" }
+# cubecl-wgpu = { path = "vendor/cubecl-wgpu" }
+# cubecl-std = { path = "vendor/cubecl-std" }
+# cubecl-runtime = { path = "vendor/cubecl-runtime" }
+# cubecl-macros = { path = "vendor/cubecl-macros" }
+# cubecl-macros-internal = { path = "vendor/cubecl-macros-internal" }
+# cubecl-opt = { path = "vendor/cubecl-opt" }
+# cubecl-common = { path = "vendor/cubecl-common" }
