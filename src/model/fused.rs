@@ -338,9 +338,8 @@ mod cube_impls {
             v: Tensor<Self, 4>,
         ) -> Tensor<Self, 4> {
             // Decomposed: Q×K_T → fused_softmax → attn×V
-            // k_t is already [B, H, dh, S] so no swap_dims copy needed.
-            // The autotuned matmul kernels outperform our custom flash attention
-            // kernel for S≤1057 because they use register tiling.
+            // k_t has swap_dims'd strides but contiguous base → cubecl sees
+            // MildlyPermuted{transposed:true} which enables CMMA strategies.
             let scores = q.matmul(k_t);  // [B, H, S, S]
             let attn = Self::fused_softmax(scores, 3);
             attn.matmul(v)  // [B, H, S, dh]

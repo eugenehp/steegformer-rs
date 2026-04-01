@@ -1022,7 +1022,25 @@ pub fn launch_fused_embed(
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// 11) Tiled Flash Attention — fused Q×K^T → softmax → attn×V
+// 11) WMMA Batched Matmul for Attention Q×K^T
+//
+// Uses simdgroup_matrix_8x8 (WMMA) to compute Q×K^T without shared memory.
+// For K=64: 8 WMMA steps fit in registers. Bypasses cubecl's autotune
+// which falls back to scalar unit kernels for this shape.
+//
+// This kernel replaces the decomposed q.matmul(k.swap_dims(2,3)) dispatch
+// which uses cubecl's generic matmul that picks suboptimal strategies
+// for small K (K=64 → HighlyPermuted or unit fallback → 4× slower).
+// ══════════════════════════════════════════════════════════════════════════
+
+// WMMA batched Q×K^T kernel placeholder - requires cubecl 0.9 CMMA API
+// adaptation (Matrix::uninitialized + load from shared memory staging).
+// The current cubecl CMMA API requires shared memory staging which is
+// what causes the 32KB overflow for K=64 with large output tiles.
+// Left as future work.
+
+// ══════════════════════════════════════════════════════════════════════════
+// 12) Tiled Flash Attention — fused Q×K^T → softmax → attn×V
 //
 //    Tiled flash attention with SharedMemory for K/V reuse across query rows.
 //    Each workgroup processes 32 query rows simultaneously, tiling over
