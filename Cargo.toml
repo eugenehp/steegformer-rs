@@ -43,6 +43,11 @@ path = "examples/reconstruct.rs"
 name = "benchmark"
 path = "examples/benchmark.rs"
 
+[[example]]
+name = "gpu_profile"
+path = "examples/gpu_profile.rs"
+required-features = ["wgpu-kernels"]
+
 [features]
 default = ["ndarray"]
 

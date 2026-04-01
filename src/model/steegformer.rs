@@ -404,7 +404,7 @@ fn forward_features_impl<B: Backend + super::FusedOps>(
 /// Forward a single transformer block using cached weights.
 /// Returns (block_output, optional_next_norm1).
 #[cfg(feature = "wgpu-kernels")]
-fn forward_block_cached<B: Backend + super::FusedOps>(
+pub fn forward_block_cached<B: Backend + super::FusedOps>(
     x: Tensor<B, 3>,
     n1: Tensor<B, 3>,
     bw: &BlockWeightCache<B>,
